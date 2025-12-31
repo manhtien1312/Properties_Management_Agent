@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from src.database.database import SessionLocal
 from src.agent.asset_assignment_agent import get_employee_lifecycle_agent
-from src.agent.tools import EmployeeLifecycleTools
+from src.agent.tool.tools import EmployeeLifecycleTools
 from src.service.employee_asset_service import EmployeeService, AssetService
 
 

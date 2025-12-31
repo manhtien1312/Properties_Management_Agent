@@ -1,0 +1,59 @@
+{
+  "model_type": "XGBoost",
+  "model_version": "1.0",
+  "trained_date": "2025-12-31T09:13:57.038903",
+  "feature_names": [
+    "tenure_months",
+    "months_since_last_promotion",
+    "salary_change_percent_1y",
+    "performance_rating_avg",
+    "performance_rating_trend",
+    "sick_days_ytd",
+    "unplanned_leaves_ytd",
+    "engagement_score_latest",
+    "engagement_score_trend",
+    "manager_changes",
+    "department_changes",
+    "training_hours_ytd",
+    "overtime_hours_avg",
+    "remote_work_percent",
+    "project_count",
+    "reports_count"
+  ],
+  "feature_importance": {
+    "engagement_score_latest": 0.20975011587142944,
+    "performance_rating_avg": 0.06708703190088272,
+    "remote_work_percent": 0.06545750051736832,
+    "overtime_hours_avg": 0.06060027331113815,
+    "engagement_score_trend": 0.05358127877116203,
+    "salary_change_percent_1y": 0.05347473546862602,
+    "unplanned_leaves_ytd": 0.05299363657832146,
+    "manager_changes": 0.05241887643933296,
+    "training_hours_ytd": 0.05142558738589287,
+    "months_since_last_promotion": 0.05108722299337387,
+    "reports_count": 0.04914689064025879,
+    "department_changes": 0.048436909914016724,
+    "performance_rating_trend": 0.048347145318984985,
+    "sick_days_ytd": 0.04796081781387329,
+    "tenure_months": 0.04577534645795822,
+    "project_count": 0.04245666787028313
+  },
+  "metrics": {
+    "accuracy": 0.79,
+    "precision": 0.6730769230769231,
+    "recall": 0.5833333333333334,
+    "f1_score": 0.6250000000000001,
+    "roc_auc": 0.7641666666666667,
+    "confusion_matrix": [
+      [
+        123,
+        17
+      ],
+      [
+        25,
+        35
+      ]
+    ]
+  },
+  "n_features": 16
+}

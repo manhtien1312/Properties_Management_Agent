@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
-from src.api import employees, assets
+from src.api import employees, assets, churn, procurement
 
 # Load environment variables
 load_dotenv()
@@ -25,6 +25,8 @@ app.add_middleware(
 # Include routers
 app.include_router(employees.router)
 app.include_router(assets.router)
+app.include_router(churn.router)
+app.include_router(procurement.router)
 
 
 @app.get("/", tags=["root"])

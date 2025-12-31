@@ -12,7 +12,9 @@ from langchain.agents import Tool, initialize_agent, AgentType
 from langchain.llms.base import LLM
 from langchain_google_genai import ChatGoogleGenerativeAI
 from src.config import settings
-from src.agent.tools import EmployeeLifecycleTools
+from src.agent.tool.tools import EmployeeLifecycleTools
+from src.agent.tool.churn_prediction_tools import ChurnPredictionTools
+from src.agent.tool.procurement_forecasting_tools import ProcurementForecastingTools
 from src.email_service import EmailService
 
 logger = logging.getLogger(__name__)
@@ -561,6 +563,159 @@ class EmployeeLifecycleAgent:
                 "success": False,
                 "error": str(e)
             }
+    
+    def predict_employee_churn(
+        self,
+        employee_id: int,
+        db: Session
+    ) -> Dict[str, Any]:
+        """
+        Predict churn risk for a specific employee
+        
+        Args:
+            employee_id: Employee ID
+            db: Database session
+            
+        Returns:
+            Dictionary with churn prediction results
+        """
+        
+        logger.info(f"Predicting churn for employee {employee_id}")
+        
+        try:
+            result = ChurnPredictionTools.predict_employee_churn(employee_id, db)
+            return result
+        
+        except Exception as e:
+            logger.error(f"Error predicting churn: {e}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    def get_high_risk_employees(
+        self,
+        db: Session,
+        min_probability: float = 0.7
+    ) -> Dict[str, Any]:
+        """
+        Get all employees with high churn risk
+        
+        Args:
+            db: Database session
+            min_probability: Minimum probability threshold
+            
+        Returns:
+            Dictionary with high-risk employees
+        """
+        
+        logger.info(f"Getting high risk employees (threshold: {min_probability})")
+        
+        try:
+            result = ChurnPredictionTools.get_high_risk_employees(db, min_probability)
+            return result
+        
+        except Exception as e:
+            logger.error(f"Error getting high risk employees: {e}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    def predict_department_churn(
+        self,
+        department: str,
+        db: Session
+    ) -> Dict[str, Any]:
+        """
+        Predict churn for all employees in a specific department
+        
+        Args:
+            department: Department name
+            db: Database session
+            
+        Returns:
+            Dictionary with department churn analysis
+        """
+        
+        logger.info(f"Predicting churn for department: {department}")
+        
+        try:
+            result = ChurnPredictionTools.predict_department_churn(department, db)
+            return result
+        
+        except Exception as e:
+            logger.error(f"Error predicting department churn: {e}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    def get_procurement_forecast(
+        self,
+        db: Session,
+        forecast_months: int = 6,
+        safety_stock_percent: float = 0.2
+    ) -> Dict[str, Any]:
+        """
+        Get procurement forecast based on asset health and churn predictions
+        
+        Args:
+            db: Database session
+            forecast_months: Number of months to forecast
+            safety_stock_percent: Safety stock buffer percentage
+            
+        Returns:
+            Dictionary with procurement recommendations
+        """
+        
+        logger.info(f"Generating procurement forecast for {forecast_months} months")
+        
+        try:
+            result = ProcurementForecastingTools.get_procurement_recommendations(
+                db, forecast_months, safety_stock_percent
+            )
+            return result
+        
+        except Exception as e:
+            logger.error(f"Error generating procurement forecast: {e}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    def get_procurement_report(
+        self,
+        db: Session,
+        include_details: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Get comprehensive procurement report
+        
+        Args:
+            db: Database session
+            include_details: Include detailed asset and employee information
+            
+        Returns:
+            Dictionary with comprehensive procurement report
+        """
+        
+        logger.info("Generating procurement report")
+        
+        try:
+            result = ProcurementForecastingTools.get_procurement_report(
+                db, include_details
+            )
+            return result
+        
+        except Exception as e:
+            logger.error(f"Error generating procurement report: {e}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
+
+
 # Singleton instance
 _lifecycle_agent_instance = None
 
