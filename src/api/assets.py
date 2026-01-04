@@ -177,7 +177,7 @@ def get_asset_health_summary(
     - Device type distribution
     - Total asset value and depreciation
     """
-    from src.agent.tools.tools import EmployeeLifecycleTools
+    from src.agent.tool.tools import EmployeeLifecycleTools
     try:
         result = EmployeeLifecycleTools.get_asset_health_summary(db)
         return result

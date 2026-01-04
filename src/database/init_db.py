@@ -172,20 +172,27 @@ def init_database():
     all_employee_ids = managers_it + managers_marketing + staff_ids
     print(f"✓ Inserted {len(all_employee_ids)} employees")
     
+    # Get active employees and their departments
+    cursor.execute('''
+        SELECT employee_id, department FROM Employee 
+        WHERE employment_status = 'active'
+    ''')
+    active_employees = cursor.fetchall()
+    
     # Create assets
     brands_laptops = ['Dell', 'HP', 'Lenovo', 'Apple', 'ASUS']
-    brands_monitors = ['Dell', 'LG', 'ASUS', 'HP', 'BenQ']
+    brands_monitors = ['Dell', 'LG', 'ASUS', 'HP', 'BenQ', 'Samsung']
     brands_phones = ['Apple', 'Samsung', 'Google', 'Microsoft']
     
     models_laptops = ['XPS 13', 'ProBook 450', 'ThinkPad X1', 'MacBook Pro', 'VivoBook']
-    models_monitors = ['U2719D', '27UP550', 'VP28UQG', 'Z27', 'BenQ EW2880U']
+    models_monitors = ['U2719D', '27UP550', 'VP28UQG', 'Z27', 'BenQ EW2880U', 'U28E590D']
     models_phones = ['iPhone 13', 'Galaxy S22', 'Pixel 7', 'Surface Duo']
     
-    device_types = ['laptop', 'monitor', 'phone']
     asset_counter = 1
     
-    for i in range(180):  # 180 assets
-        device_type = random.choice(device_types)
+    def create_asset(device_type, assigned_to=None):
+        """Helper function to create an asset"""
+        nonlocal asset_counter
         
         if device_type == 'laptop':
             brand = random.choice(brands_laptops)
@@ -208,31 +215,17 @@ def init_database():
         purchase_date = datetime.now() - timedelta(days=random.randint(30, 1825))
         current_value = purchase_value * depreciation
         
-        # Assignment logic
-        assigned_to = None
         assignment_date = None
-        status = random.choices(['assigned', 'returned', 'available', 'damaged', 'lost'], 
-                               weights=[0.60, 0.15, 0.15, 0.05, 0.05])[0]
+        status = 'available'
         
-        if status == 'assigned':
-            assigned_to = random.choice(all_employee_ids)
+        if assigned_to:
             assignment_date = datetime.now() - timedelta(days=random.randint(1, 730))
+            status = 'assigned'
         
-        return_date = None
-        return_due_date = None
-        if status == 'returned':
-            return_date = datetime.now() - timedelta(days=random.randint(1, 365))
-        elif status in ['assigned', 'damaged']:
-            return_due_date = datetime.now() + timedelta(days=random.randint(1, 365))
-        
-        condition = random.choices(['excellent', 'good', 'fair', 'poor', 'damaged'], 
-                                  weights=[0.20, 0.40, 0.25, 0.10, 0.05])[0]
+        condition = random.choices(['excellent', 'good', 'fair'], 
+                                  weights=[0.40, 0.50, 0.10])[0]
         
         condition_notes = ""
-        if condition in ['poor', 'damaged']:
-            notes_list = ['Needs repair', 'Battery degraded', 'Screen issue', 'Keyboard malfunction', 'Hardware failure']
-            condition_notes = random.choice(notes_list)
-        
         warranty_expiry = purchase_date + timedelta(days=random.randint(365, 1095))
         last_maintenance = datetime.now() - timedelta(days=random.randint(30, 365))
         
@@ -244,14 +237,38 @@ def init_database():
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (asset_tag, serial_number, device_type, brand, model, purchase_date.date(), purchase_value, current_value,
               assigned_to, assignment_date.date() if assignment_date else None, status,
-              return_date.date() if return_date else None,
-              return_due_date.date() if return_due_date else None,
-              condition, condition_notes, random.choice(locations), 
+              None, None, condition, condition_notes, random.choice(locations), 
               warranty_expiry.date(), last_maintenance.date()))
         
         asset_counter += 1
     
-    print(f"✓ Inserted {asset_counter - 1} assets")
+    # Assign assets to ALL active employees according to policy
+    for employee_id, department in active_employees:
+        if department == 'it':
+            # IT department: 1 laptop + 2 monitors
+            create_asset('laptop', employee_id)
+            create_asset('monitor', employee_id)
+            create_asset('monitor', employee_id)
+        else:  # marketing
+            # Marketing department: 1 laptop + 1 monitor
+            create_asset('laptop', employee_id)
+            create_asset('monitor', employee_id)
+    
+    # Create additional available/unassigned assets for inventory (about 30% more)
+    num_extra_laptops = int(len(active_employees) * 0.3)
+    num_extra_monitors = int(len(active_employees) * 0.3)
+    num_extra_phones = int(len(active_employees) * 0.5)
+    
+    for _ in range(num_extra_laptops):
+        create_asset('laptop')
+    
+    for _ in range(num_extra_monitors):
+        create_asset('monitor')
+    
+    for _ in range(num_extra_phones):
+        create_asset('phone')
+    
+    print(f"✓ Inserted {asset_counter - 1} assets (all active employees fully equipped + {num_extra_laptops + num_extra_monitors + num_extra_phones} inventory assets)")
     
     # Create HR Analytics records
     # Create multiple records per employee (multiple months)
