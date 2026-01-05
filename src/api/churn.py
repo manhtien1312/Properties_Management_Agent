@@ -5,12 +5,19 @@ Provides employee churn risk assessment and predictions
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from typing import Dict, Any
+from typing import Dict, Any, Optional
+from pydantic import BaseModel
 from src.database.database import get_db
 from src.agent.asset_assignment_agent import get_employee_lifecycle_agent
 from src.agent.tool.churn_prediction_tools import ChurnPredictionTools
 
 router = APIRouter(prefix="/api/churn", tags=["churn-prediction"])
+
+
+class ChatbotRequest(BaseModel):
+    """Request model for chatbot endpoint"""
+    question: str
+    employee_id: Optional[int] = None
 
 
 @router.get("/predict/{employee_id}", response_model=dict)
@@ -134,16 +141,15 @@ def batch_predict_churn(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/chatbot", response_model=dict)
+@router.post("/chatbot", response_model=dict)
 def churn_chatbot(
-    question: str = Query(..., description="Your question about employees, assets, or churn prediction"),
-    employee_id: int = Query(None, description="Optional employee ID for context"),
+    request: ChatbotRequest,
     db: Session = Depends(get_db)
 ):
     """
     Unified conversational chatbot for HR and asset management questions
     
-    Query Parameters:
+    Request Body:
     - question: Your question (required)
     - employee_id: Optional employee ID for context-specific answers
     
@@ -154,12 +160,18 @@ def churn_chatbot(
     - Asset health reports and refresh tracking
     
     Examples:
-    - "How many assets is employee 5 currently using?"
-    - "If employee 10 resigns, what assets must be returned and do they need refresh?"
-    - "What is the churn risk for employee 5?"
-    - "Which employees are most likely to resign?"
+    {
+        "question": "How many assets is employee 5 currently using?"
+    }
+    {
+        "question": "If employee 10 resigns, what assets must be returned?",
+        "employee_id": 10
+    }
     """
     try:
+        # Extract from request body
+        question = request.question
+        employee_id = request.employee_id
         from langchain_google_genai import ChatGoogleGenerativeAI
         from src.config import settings
         from src.agent.tool.chatbot_tools import UnifiedChatbotTools
@@ -260,24 +272,161 @@ def churn_chatbot(
             if context_data.get('success') and refresh_data.get('success'):
                 context_data['refresh_data'] = refresh_data
                 
-                # Prepare chart data
-                chart_data = {
-                    "age_distribution": context_data['health_summary']['age_categories'],
-                    "condition_distribution": context_data['health_summary']['condition_distribution'],
-                    "device_type_distribution": context_data['health_summary']['device_type_distribution'],
-                    "refresh_urgency": {
-                        "urgent": len([a for a in refresh_data['assets_for_refresh'] if a['refresh_status'] == 'URGENT']),
-                        "recommended": len([a for a in refresh_data['assets_for_refresh'] if a['refresh_status'] == 'RECOMMENDED']),
-                        "ok": context_data['total_assets'] - refresh_data['refresh_count']
+                # Get detailed breakdown by device type and age for visualization
+                from src.database.models import Asset
+                from datetime import datetime, timedelta
+                
+                # Calculate age thresholds
+                today = datetime.now().date()
+                one_year_ago = today - timedelta(days=365)
+                three_years_ago = today - timedelta(days=3*365)
+                
+                # Query assets grouped by device type and age
+                all_assets = db.query(Asset).all()
+                
+                device_types = ['laptop', 'monitor', 'phone']
+                age_breakdown = {
+                    'new': {dt: 0 for dt in device_types},
+                    'mid_age': {dt: 0 for dt in device_types},
+                    'old': {dt: 0 for dt in device_types}
+                }
+                
+                for asset in all_assets:
+                    if asset.device_type in device_types:
+                        if asset.purchase_date >= one_year_ago:
+                            age_breakdown['new'][asset.device_type] += 1
+                        elif asset.purchase_date >= three_years_ago:
+                            age_breakdown['mid_age'][asset.device_type] += 1
+                        else:
+                            age_breakdown['old'][asset.device_type] += 1
+                
+                # Add visualization data
+                context_data['visualization'] = {
+                    'type': 'ui',
+                    'kind': 'visualization',
+                    'data': {
+                        'type': 'bar',
+                        'title': 'Asset Health by Device Type and Age',
+                        'labels': ['Laptop', 'Monitor', 'Phone'],
+                        'datasets': [
+                            {
+                                'label': 'New (0-1 years)',
+                                'data': [
+                                    age_breakdown['new']['laptop'],
+                                    age_breakdown['new']['monitor'],
+                                    age_breakdown['new']['phone']
+                                ]
+                            },
+                            {
+                                'label': 'Mid-Age (1-3 years)',
+                                'data': [
+                                    age_breakdown['mid_age']['laptop'],
+                                    age_breakdown['mid_age']['monitor'],
+                                    age_breakdown['mid_age']['phone']
+                                ]
+                            },
+                            {
+                                'label': 'Old (>3 years)',
+                                'data': [
+                                    age_breakdown['old']['laptop'],
+                                    age_breakdown['old']['monitor'],
+                                    age_breakdown['old']['phone']
+                                ]
+                            }
+                        ]
                     }
                 }
+                
+                # # Prepare chart data (backward compatibility)
+                # chart_data = {
+                #     "age_distribution": context_data['health_summary']['age_categories'],
+                #     "condition_distribution": context_data['health_summary']['condition_distribution'],
+                #     "device_type_distribution": context_data['health_summary']['device_type_distribution'],
+                #     "refresh_urgency": {
+                #         "urgent": len([a for a in refresh_data['assets_for_refresh'] if a['refresh_status'] == 'URGENT']),
+                #         "recommended": len([a for a in refresh_data['assets_for_refresh'] if a['refresh_status'] == 'RECOMMENDED']),
+                #         "ok": context_data['total_assets'] - refresh_data['refresh_count']
+                #     }
+                # }
         elif question_type == "churn_list":
             # Get all high-risk employees
-            context_data = ChurnPredictionTools.get_high_risk_employees(db, min_probability=0.7)
+            raw_data = ChurnPredictionTools.get_high_risk_employees(db, min_probability=0.7)
+            
+            # Transform data for UI visualization
+            if raw_data.get('success'):
+                total_employees = raw_data.get('total_employees', 0)
+                high_risk_count = raw_data.get('high_risk_count', 0)
+                lower_risk_count = total_employees - high_risk_count
+                
+                context_data = {
+                    'success': True,
+                    'total_employees': total_employees,
+                    'high_risk_count': high_risk_count,
+                    'high_risk_employees': raw_data.get('high_risk_employees', []),
+                    'threshold': raw_data.get('threshold', 0.7),
+                    'visualization': {
+                        'type': 'ui',
+                        'kind': 'visualization',
+                        'data': {
+                            'type': 'pie',
+                            'title': 'Company-Wide Churn Risk Distribution',
+                            'labels': ['High Risk (≥70%)', 'Lower Risk (<70%)'],
+                            'datasets': [
+                                {
+                                    'label': 'Count',
+                                    'data': [high_risk_count, lower_risk_count]
+                                }
+                            ]
+                        }
+                    }
+                }
+            else:
+                context_data = raw_data
         elif question_type == "churn_department":
             if department:
                 # Get churn predictions for specific department
-                context_data = ChurnPredictionTools.predict_department_churn(department, db)
+                raw_data = ChurnPredictionTools.predict_department_churn(department, db)
+                
+                # Transform data for UI visualization
+                if raw_data.get('success'):
+                    risk_summary = raw_data.get('risk_summary', {})
+                    all_predictions = raw_data.get('predictions', [])
+                    
+                    # Extract high-risk employees for the LLM to reference
+                    high_risk_employees = [
+                        emp for emp in all_predictions 
+                        if emp.get('probability', 0) >= 0.7
+                    ]
+                    
+                    context_data = {
+                        'success': True,
+                        'department': raw_data.get('department'),
+                        'total_employees': raw_data.get('total_employees'),
+                        'average_churn_probability': raw_data.get('average_churn_probability'),
+                        'risk_summary': risk_summary,
+                        'high_risk_employees': high_risk_employees,  # Include employee details for LLM
+                        'visualization': {
+                            'type': 'ui',
+                            'kind': 'visualization',
+                            'data': {
+                                'type': 'donut',
+                                'title': f"{raw_data.get('department', '').upper()} Department Churn Risk Distribution",
+                                'labels': ['High Risk', 'Medium Risk', 'Low Risk'],
+                                'datasets': [
+                                    {
+                                        'label': 'Count',
+                                        'data': [
+                                            risk_summary.get('high_risk', 0),
+                                            risk_summary.get('medium_risk', 0),
+                                            risk_summary.get('low_risk', 0)
+                                        ]
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                else:
+                    context_data = raw_data
             else:
                 # Department not found, provide helpful message
                 context_data = {
@@ -708,39 +857,41 @@ RECOMMENDED ACTIONS:
         
         elif question_type == "churn_department" and context_data:
             if context_data.get('success'):
-                predictions = context_data.get('predictions', [])
+                risk_summary = context_data.get('risk_summary', {})
+                high_risk_employees = context_data.get('high_risk_employees', [])
+                
                 system_prompt += f"""
 === DATABASE QUERY RESULTS (ALREADY RETRIEVED) ===
 
 DEPARTMENT CHURN ANALYSIS:
 Department: {context_data.get('department', 'Unknown').upper()}
 Total Employees: {context_data.get('total_employees', 0)}
-Average Churn Probability: {context_data.get('average_probability', 0)*100:.1f}%
+Average Churn Probability: {context_data.get('average_churn_probability', 0)*100:.1f}%
 
 RISK BREAKDOWN:
-- High Risk (≥70%): {context_data.get('high_risk_count', 0)} employees
-- Medium Risk (40-70%): {context_data.get('medium_risk_count', 0)} employees
-- Low Risk (<40%): {context_data.get('low_risk_count', 0)} employees
+- High Risk (≥70%): {risk_summary.get('high_risk', 0)} employees
+- Medium Risk (40-70%): {risk_summary.get('medium_risk', 0)} employees
+- Low Risk (<40%): {risk_summary.get('low_risk', 0)} employees
 
 HIGH-RISK EMPLOYEES IN THIS DEPARTMENT:
 """
                 # Show high-risk employees
-                high_risk = [p for p in predictions if p.get('probability', 0) >= 0.7]
-                if high_risk:
-                    for i, emp in enumerate(high_risk[:10], 1):  # Top 10
+                if high_risk_employees:
+                    for i, emp in enumerate(high_risk_employees, 1):
                         system_prompt += f"\n{i}. {emp['employee_name']} (ID: {emp['employee_id']})\n"
-                        system_prompt += f"   - Probability: {emp['probability']*100:.1f}%\n"
-                        system_prompt += f"   - Risk: {emp['risk_category']}\n"
+                        system_prompt += f"   - Churn Probability: {emp['probability']*100:.1f}%\n"
+                        system_prompt += f"   - Risk Category: {emp['risk_category']}\n"
+                        if emp.get('top_factors'):
+                            top_factor = emp['top_factors'][0]
+                            system_prompt += f"   - Top Risk Factor: {top_factor.get('feature', 'N/A')} = {top_factor.get('value', 'N/A')}\n"
                 else:
                     system_prompt += "\nNo high-risk employees in this department.\n"
                 
                 system_prompt += f"""
-DEPARTMENT INSIGHTS:
-{context_data.get('department_insights', 'Analysis complete.')}
-
 RECOMMENDED ACTIONS:
 - Focus retention efforts on high-risk employees listed above
 - Review department-wide engagement and satisfaction
+- Schedule 1-on-1 meetings with high-risk employees
 - Address common risk factors across the team
 """
             else:
