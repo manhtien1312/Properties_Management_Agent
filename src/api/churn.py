@@ -147,6 +147,12 @@ def churn_chatbot(
     - question: Your question (required)
     - employee_id: Optional employee ID for context-specific answers
     
+    Supported Topics:
+    - Asset counts and assignments
+    - Resignation and asset returns
+    - Churn prediction (individual and department)
+    - Asset health reports and refresh tracking
+    
     Examples:
     - "How many assets is employee 5 currently using?"
     - "If employee 10 resigns, what assets must be returned and do they need refresh?"
@@ -157,6 +163,9 @@ def churn_chatbot(
         from langchain_google_genai import ChatGoogleGenerativeAI
         from src.config import settings
         from src.agent.tool.chatbot_tools import UnifiedChatbotTools
+        from src.agent.tool.tools import EmployeeLifecycleTools
+        from src.agent.tool.procurement_forecasting_tools import ProcurementForecastingTools
+        from src.agent.asset_recovery_agent import get_asset_recovery_agent
         
         # Classify question type
         question_type = UnifiedChatbotTools.classify_question_type(question)
@@ -170,12 +179,111 @@ def churn_chatbot(
         
         # Get context based on question type
         context_data = None
-        if question_type == "churn_list":
+        chart_data = None
+        
+        if question_type == "send_recovery_email":
+            # Extract employee ID
+            if not employee_id:
+                employee_id = UnifiedChatbotTools.extract_employee_id(question)
+            
+            if employee_id:
+                # First check if employee has resignation date set
+                from src.database.models import Employee
+                from datetime import date
+                
+                employee = db.query(Employee).filter(Employee.employee_id == employee_id).first()
+                
+                if not employee:
+                    return {
+                        "success": False,
+                        "error": f"Employee {employee_id} not found",
+                        "answer": f"I couldn't find employee {employee_id} in the database. Please check the employee ID."
+                    }
+                
+                # If no resignation date, set it to today
+                if not employee.resignation_date:
+                    employee.resignation_date = date.today()
+                    employee.employment_status = 'resigned'
+                    db.commit()
+                
+                # Invoke asset recovery agent to send email
+                recovery_agent = get_asset_recovery_agent()
+                context_data = recovery_agent.process_resignation(employee_id, db, return_days=7)
+            else:
+                return {
+                    "success": False,
+                    "error": "Employee ID required to send recovery email",
+                    "answer": "Please specify which employee. For example: 'Send email to employee 10' or 'Yes, send email for employee 10'"
+                }
+        
+        elif question_type == "procurement_forecast":
+            # Get procurement recommendations and demand analysis
+            context_data = ProcurementForecastingTools.get_procurement_recommendations(
+                db, 
+                forecast_months=6, 
+                safety_stock_percent=0.2
+            )
+            
+            if context_data.get('success'):
+                # Prepare chart data for visualization
+                chart_data = {
+                    "procurement_needs": {},
+                    "demand_breakdown": {},
+                    "inventory_status": {}
+                }
+                
+                for rec in context_data.get('recommendations', []):
+                    device_type = rec['device_type']
+                    
+                    # Purchase quantities by device type
+                    chart_data["procurement_needs"][device_type] = rec['purchase_quantity']
+                    
+                    # Demand breakdown (refresh vs churn)
+                    chart_data["demand_breakdown"][device_type] = {
+                        "refresh": rec['demand_breakdown']['refresh_needed'],
+                        "churn": rec['demand_breakdown']['churn_replacement']
+                    }
+                    
+                    # Inventory status (demand vs available)
+                    chart_data["inventory_status"][device_type] = {
+                        "needed": rec['demand_breakdown']['total_needed_with_buffer'],
+                        "available": rec['inventory']['available_stock'],
+                        "shortage": rec['inventory']['shortage']
+                    }
+        
+        elif question_type == "asset_health":
+            # Get asset health summary and refresh data
+            context_data = EmployeeLifecycleTools.get_asset_health_summary(db)
+            refresh_data = EmployeeLifecycleTools.get_assets_for_refresh(db, age_threshold_years=3)
+            
+            # Combine data
+            if context_data.get('success') and refresh_data.get('success'):
+                context_data['refresh_data'] = refresh_data
+                
+                # Prepare chart data
+                chart_data = {
+                    "age_distribution": context_data['health_summary']['age_categories'],
+                    "condition_distribution": context_data['health_summary']['condition_distribution'],
+                    "device_type_distribution": context_data['health_summary']['device_type_distribution'],
+                    "refresh_urgency": {
+                        "urgent": len([a for a in refresh_data['assets_for_refresh'] if a['refresh_status'] == 'URGENT']),
+                        "recommended": len([a for a in refresh_data['assets_for_refresh'] if a['refresh_status'] == 'RECOMMENDED']),
+                        "ok": context_data['total_assets'] - refresh_data['refresh_count']
+                    }
+                }
+        elif question_type == "churn_list":
             # Get all high-risk employees
             context_data = ChurnPredictionTools.get_high_risk_employees(db, min_probability=0.7)
-        elif question_type == "churn_department" and department:
-            # Get churn predictions for specific department
-            context_data = ChurnPredictionTools.predict_department_churn(department, db)
+        elif question_type == "churn_department":
+            if department:
+                # Get churn predictions for specific department
+                context_data = ChurnPredictionTools.predict_department_churn(department, db)
+            else:
+                # Department not found, provide helpful message
+                context_data = {
+                    'success': False,
+                    'error': 'Department not specified. Please mention IT or Marketing department.'
+                }
         elif employee_id:
             if question_type == "asset_count":
                 context_data = UnifiedChatbotTools.get_employee_asset_count(employee_id, db)
@@ -230,11 +338,203 @@ You can help with:
 1. Employee Asset Management - Track assets assigned to employees
 2. Asset Health & Refresh - Determine if returned assets need replacement (>3 years old)
 3. Churn Prediction - Predict employee turnover risk using ML
+4. Asset Health Reports - Overview of all assets age, condition, and refresh needs
+5. Procurement Forecasting - Predict asset purchase needs based on aging and churn
+6. Asset Recovery - Send email notifications for asset returns when employees resign
 
 """
         
-        if question_type == "asset_count" and context_data:
-            if context_data.get('success'):
+        if question_type == "send_recovery_email":
+            if context_data and context_data.get('success'):
+                system_prompt += f"""
+=== ASSET RECOVERY EMAIL ACTION COMPLETED ===
+
+✅ EMAIL HAS BEEN SENT
+
+Employee Information:
+- Name: {context_data.get('employee_name')}
+- ID: {context_data.get('employee_id')}
+- Resignation Date: {context_data.get('resignation_date')}
+- Return Due Date: {context_data.get('return_due_date')}
+
+Asset Recovery Process Completed:
+- Total Assets to Return: {context_data.get('total_assets')}
+- Assets Scheduled for Return: {context_data.get('assets_scheduled')}
+- Email Notification Sent: {'✅ YES' if context_data.get('email_sent') else '❌ NO'}
+- Email Status: {context_data.get('email_message', 'Email sent successfully')}
+
+What was sent:
+The asset return notification email has been sent to {context_data.get('employee_name')} and includes:
+- Complete list of all {context_data.get('total_assets')} assets to be returned
+- Return due date: {context_data.get('return_due_date')}
+- Detailed instructions for asset return process
+- IT department contact information
+
+IMPORTANT: Tell the user that the email HAS BEEN SENT (past tense) - not "will be sent" or "I will send".
+Confirm specific details: employee name, number of assets, and return date.
+"""
+            else:
+                error_msg = context_data.get('error', 'Unknown error') if context_data else 'No employee ID provided'
+                system_prompt += f"""
+=== ERROR - EMAIL NOT SENT ===
+
+❌ Failed to send asset recovery email
+
+Error: {error_msg}
+
+Please check:
+- Employee ID is correct
+- Employee has assigned assets
+- Email configuration is properly set up in the system
+
+Tell the user the email was NOT sent and explain the specific error.
+"""
+        
+        elif question_type == "procurement_forecast":
+            if context_data and context_data.get('success'):
+                system_prompt += f"""
+=== DATABASE QUERY RESULTS (ALREADY RETRIEVED) ===
+
+PROCUREMENT FORECAST ANALYSIS:
+Forecast Period: {context_data.get('forecast_months', 6)} months
+Safety Stock Buffer: {context_data.get('safety_stock_percent', 0.2) * 100:.0f}%
+
+OVERALL SUMMARY:
+- Total Demand: {context_data.get('total_demand_count', 0)} assets
+- Available Stock: {context_data.get('total_available', 0)} assets
+- Purchase Required: {context_data.get('total_shortage', 0)} assets
+- Action Required: {'YES' if context_data.get('action_required', False) else 'NO'}
+
+DETAILED PROCUREMENT RECOMMENDATIONS:
+"""
+                for rec in context_data.get('recommendations', []):
+                    system_prompt += f"""
+{rec['device_type'].upper()}:
+  Demand Breakdown:
+    - Assets Needing Refresh (>3 years): {rec['demand_breakdown']['refresh_needed']}
+    - Churn Replacement (High-risk employees): {rec['demand_breakdown']['churn_replacement']}
+    - Base Demand Total: {rec['demand_breakdown']['total_base_demand']}
+    - Safety Buffer (+{context_data.get('safety_stock_percent', 0.2) * 100:.0f}%): {rec['demand_breakdown']['safety_buffer']}
+    - Total Needed with Buffer: {rec['demand_breakdown']['total_needed_with_buffer']}
+  
+  Inventory Status:
+    - Available Stock: {rec['inventory']['available_stock']}
+    - Shortage: {rec['inventory']['shortage']}
+    - Surplus: {rec['inventory']['surplus']}
+  
+  Recommendation:
+    - Action Required: {'YES' if rec['action_required'] else 'NO'}
+    - Purchase Quantity: {rec['purchase_quantity']} units
+    - Priority: {rec['priority']}
+    - Timeline: {rec['estimated_timeline']}
+    - Message: {rec['recommendation']}
+"""
+                
+                system_prompt += f"""
+DEMAND DRIVERS ANALYSIS:
+"""
+                demand_analysis = context_data.get('demand_analysis', {})
+                if demand_analysis.get('success'):
+                    system_prompt += f"""
+  Refresh-Based Demand (Aging Assets >3 years):
+"""
+                    for device_type, data in demand_analysis.get('refresh_by_type', {}).items():
+                        system_prompt += f"    - {device_type}: {data['urgent']} urgent (>5 years) + {data['recommended']} recommended (3-5 years) = {data['urgent'] + data['recommended']} total\n"
+                    
+                    system_prompt += f"""
+  Churn-Based Demand (High-risk Employee Assets):
+    - High-Risk Employees: {demand_analysis.get('high_risk_employee_count', 0)}
+    - Assets at Risk:
+"""
+                    for device_type, count in demand_analysis.get('churn_assets_by_type', {}).items():
+                        system_prompt += f"      - {device_type}: {count} assets\n"
+                
+                system_prompt += f"""
+SUMMARY MESSAGE:
+{context_data.get('summary_message', 'Analysis complete.')}
+
+KEY INSIGHTS:
+- Procurement is {'REQUIRED' if context_data.get('action_required', False) else 'NOT REQUIRED'} for the forecast period
+- Total investment needed: Varies by device type and market prices
+- Primary driver: {'Asset aging and refresh needs' if context_data.get('total_shortage', 0) > 0 else 'Adequate inventory available'}
+- Recommended action: {'Proceed with procurement planning' if context_data.get('action_required', False) else 'Monitor inventory levels'}
+"""
+            else:
+                system_prompt += f"""
+=== ERROR ===
+Unable to retrieve procurement forecast data.
+Please ensure the database contains employee and asset information.
+"""
+        
+        elif question_type == "asset_health":
+            if context_data and context_data.get('success'):
+                health = context_data.get('health_summary', {})
+                refresh = context_data.get('refresh_data', {})
+                
+                system_prompt += f"""
+=== DATABASE QUERY RESULTS (ALREADY RETRIEVED) ===
+
+ASSET HEALTH & AGE SUMMARY:
+Total Assets in System: {context_data.get('total_assets', 0)}
+
+AGE STATISTICS:
+- Average Asset Age: {health.get('age_statistics', {}).get('average_age_years', 0)} years
+- Oldest Asset: {health.get('age_statistics', {}).get('oldest_asset_years', 0)} years
+- Newest Asset: {health.get('age_statistics', {}).get('newest_asset_years', 0)} years
+
+AGE DISTRIBUTION:
+- New (0-1 years): {health.get('age_categories', {}).get('new_0_1_years', 0)} assets
+- Mid-Age (1-3 years): {health.get('age_categories', {}).get('mid_age_1_3_years', 0)} assets
+- Old (>3 years): {health.get('age_categories', {}).get('old_over_3_years', 0)} assets
+
+CONDITION DISTRIBUTION:
+"""
+                for condition, count in health.get('condition_distribution', {}).items():
+                    system_prompt += f"- {condition.capitalize()}: {count} assets\n"
+                
+                system_prompt += f"""
+DEVICE TYPE DISTRIBUTION:
+"""
+                for device_type, count in health.get('device_type_distribution', {}).items():
+                    system_prompt += f"- {device_type.capitalize()}: {count} assets\n"
+                
+                system_prompt += f"""
+FINANCIAL METRICS:
+- Total Asset Value: ${health.get('total_asset_value', 0):,.2f}
+- Depreciation Rate: {health.get('depreciation_percent', 0)}%
+
+REFRESH ANALYSIS (Assets >3 years old):
+- Total Assets Needing Refresh: {refresh.get('refresh_count', 0)}
+- Urgent (>5 years): {len([a for a in refresh.get('assets_for_refresh', []) if a.get('refresh_status') == 'URGENT'])} assets
+- Recommended (3-5 years): {len([a for a in refresh.get('assets_for_refresh', []) if a.get('refresh_status') == 'RECOMMENDED'])} assets
+- Total Refresh Value: ${refresh.get('total_refresh_value', 0):,.2f}
+
+TOP AGING ASSETS (Oldest First):
+"""
+                for i, asset in enumerate(refresh.get('assets_for_refresh', [])[:10], 1):
+                    system_prompt += f"\n{i}. {asset['asset_tag']} ({asset['device_type']})\n"
+                    system_prompt += f"   - Age: {asset['age_years']} years\n"
+                    system_prompt += f"   - Brand/Model: {asset['brand']} {asset['model']}\n"
+                    system_prompt += f"   - Status: {asset['refresh_status']}\n"
+                    system_prompt += f"   - Condition: {asset['condition']}\n"
+                    system_prompt += f"   - Current Value: ${asset['current_value']:,.2f}\n"
+                
+                system_prompt += """
+RECOMMENDATIONS:
+- Prioritize replacement of URGENT assets (>5 years old)
+- Plan refresh budget for RECOMMENDED assets
+- Consider bulk purchasing for cost savings
+- Review asset assignment policies
+"""
+            else:
+                system_prompt += f"""
+=== ERROR ===
+Unable to retrieve asset health data.
+Please ensure the database contains asset information.
+"""
+        
+        elif question_type == "asset_count":
+            if context_data and context_data.get('success'):
                 system_prompt += f"""
 === DATABASE QUERY RESULTS (ALREADY RETRIEVED) ===
 
@@ -298,6 +598,16 @@ BREAKDOWN BY DEVICE TYPE:
                     system_prompt += f"  Condition: {asset['condition']}\n"
                     system_prompt += f"  Refresh Status: {asset['refresh_status']}\n"
                     system_prompt += f"  Reason: {asset['refresh_reason']}\n"
+                
+                # Add email notification suggestion
+                system_prompt += f"""
+NEXT STEP:
+After providing the asset return information, ASK the user if they would like to send an email notification to the employee about the asset return requirements.
+
+Example: "Would you like me to send an email notification to {context_data.get('employee_name')} about these asset return requirements?"
+
+If the user says yes or requests email sending, they can ask: "Yes, send email" or "Send email to employee {context_data.get('employee_id')}"
+"""
             else:
                 system_prompt += f"\nERROR: {context_data.get('error')}\n"
         
@@ -447,13 +757,17 @@ DO NOT say you need to check anything - you already have all the data.
 Provide concrete numbers, names, and details from the retrieved data.
 Be helpful and actionable in your response.
 
+SPECIAL CASES:
+- If the user says "no", "no thanks", "that's okay", or similar, acknowledge politely (e.g., "Okay, no problem! Let me know if you need anything else.")
+- If the user says "yes" or "sure" after a resignation question, interpret it as wanting to send an email notification
+
 Your answer:"""
         
         # Get response from LLM
         response = llm.invoke(user_message)
         answer = response.content if hasattr(response, 'content') else str(response)
         
-        return {
+        result = {
             "success": True,
             "question": question,
             "question_type": question_type,
@@ -464,6 +778,12 @@ Your answer:"""
                 "data": context_data
             }
         }
+        
+        # Add chart data if available
+        if chart_data:
+            result["chart_data"] = chart_data
+        
+        return result
         
     except Exception as e:
         return {

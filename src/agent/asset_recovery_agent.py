@@ -8,7 +8,7 @@ from typing import Dict, Any, Optional
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
 from src.config import settings
-from src.agent.tools.recovery_tools import AssetRecoveryTools
+from src.agent.tool.recovery_tools import AssetRecoveryTools
 from src.email_service import EmailService
 
 logger = logging.getLogger(__name__)

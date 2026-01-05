@@ -186,9 +186,35 @@ class UnifiedChatbotTools:
             
         Returns:
             Question type: 'asset_count', 'resignation_assets', 'churn_prediction', 
-                          'churn_list', 'churn_department', or 'general'
+                          'churn_list', 'churn_department', 'asset_health', 
+                          'procurement_forecast', 'send_recovery_email', or 'general'
         """
         question_lower = question.lower()
+        
+        # Email sending for asset recovery
+        if any(keyword in question_lower for keyword in [
+            "send email", "send notification", "notify", "email notification",
+            "yes send", "send recovery email", "send asset return", "email him",
+            "email her", "send the email", "yes, send", "please send", 
+            "okay send", "ok send", "sure send"
+        ]):
+            return "send_recovery_email"
+        
+        # Procurement forecasting questions
+        if any(keyword in question_lower for keyword in [
+            "asset shortage", "buy more assets", "need to buy", "purchase asset",
+            "procurement", "should we buy", "do i need to buy", "need more assets",
+            "shortage", "need to purchase", "asset demand", "procurement forecast"
+        ]):
+            return "procurement_forecast"
+        
+        # Asset health report questions
+        if any(keyword in question_lower for keyword in [
+            "asset health", "health report", "asset condition", "aging assets",
+            "assets need refresh", "asset age", "asset status", "health summary",
+            "show report about assets", "asset overview"
+        ]):
+            return "asset_health"
         
         # Asset count questions
         if any(keyword in question_lower for keyword in [
@@ -222,7 +248,7 @@ class UnifiedChatbotTools:
         
         # Single employee churn prediction questions
         if any(keyword in question_lower for keyword in [
-            "churn", "risk", "leaving", "turnover", "attrition",
+            "churn", "resign risk", "risk", "leaving", "turnover", "attrition",
             "probability", "predict", "likely to leave"
         ]):
             return "churn_prediction"
