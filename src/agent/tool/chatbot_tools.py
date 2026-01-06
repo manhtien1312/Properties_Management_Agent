@@ -2,7 +2,7 @@
 Unified chatbot tools for answering various HR and asset management questions
 """
 from sqlalchemy.orm import Session
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
 from datetime import datetime
 from src.database.models import Employee, Asset
 from src.agent.tool.churn_prediction_tools import ChurnPredictionTools
@@ -87,6 +87,18 @@ class UnifiedChatbotTools:
             "high-risk employees in marketing",
             "turnover analysis for IT department",
             "resignation risk in the marketing team"
+        ],
+        "assign_asset": [
+            "what assets can be assigned to new employee?",
+            "which assets are available for employee 5?",
+            "show available assets for new hire",
+            "what equipment can I assign to employee 10?",
+            "available assets for onboarding employee 3",
+            "which assets can be given to employee 7?",
+            "what can I assign to new employee 15?",
+            "his role is developer and he is in IT department",
+            "she is a marketing manager",
+            "IT developer role"
         ]
     }
     
@@ -204,6 +216,127 @@ class UnifiedChatbotTools:
         }
     
     @staticmethod
+    def get_available_assets_for_new_employee(
+        employee_id: Optional[int] = None, 
+        db: Session = None,
+        role: Optional[str] = None,
+        department: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Get available assets that can be assigned to a new employee based on their role
+        
+        Args:
+            employee_id: Employee ID (optional if role and department provided)
+            db: Database session
+            role: Employee role (optional if employee_id provided)
+            department: Employee department (optional if employee_id provided)
+            
+        Returns:
+            Dictionary with available assets organized by requirements
+        """
+        try:
+            from src.agent.tool.tools import EmployeeLifecycleTools
+            
+            employee_name = "New Employee"
+            employee_dept = department
+            employee_role = role
+            emp_id = employee_id
+            
+            # Get employee info from database if employee_id is provided
+            if employee_id:
+                employee = db.query(Employee).filter(Employee.employee_id == employee_id).first()
+                
+                if employee:
+                    employee_name = employee.full_name
+                    employee_dept = employee.department
+                    employee_role = employee.role
+                    emp_id = employee.employee_id
+            
+            # Check if we have required information
+            if not employee_dept or not employee_role:
+                return {
+                    "success": False,
+                    "needs_info": True,
+                    "missing_fields": {
+                        "role": not employee_role,
+                        "department": not employee_dept
+                    },
+                    "message": "To determine asset requirements, please provide the employee's role and department."
+                }
+            
+            # Build a temporary employee-like structure for requirements
+            # We'll directly calculate requirements instead of using get_asset_requirements
+            # to avoid needing an actual employee record
+            
+            assets_needed = []
+            
+            # IT employees: 1 laptop + 2 monitors
+            if employee_dept.lower() == "it":
+                assets_needed = [
+                    {"type": "laptop", "quantity": 1, "priority": 1},
+                    {"type": "monitor", "quantity": 2, "priority": 2}
+                ]
+            # Marketing employees: 1 laptop + 1 monitor
+            elif employee_dept.lower() == "marketing":
+                assets_needed = [
+                    {"type": "laptop", "quantity": 1, "priority": 1},
+                    {"type": "monitor", "quantity": 1, "priority": 2}
+                ]
+            
+            # Managers get an additional phone
+            if employee_role.lower() == "manager":
+                assets_needed.append(
+                    {"type": "phone", "quantity": 1, "priority": 3}
+                )
+            
+            # Find available assets for each requirement
+            available_assets = []
+            total_available = 0
+            total_needed = 0
+            
+            for req in assets_needed:
+                device_type = req["type"]
+                quantity = req["quantity"]
+                priority = req["priority"]
+                total_needed += quantity
+                
+                # Find available assets of this type
+                assets_result = EmployeeLifecycleTools.find_available_assets(
+                    device_type, quantity, db
+                )
+                
+                available_count = assets_result["available_count"]
+                total_available += available_count
+                
+                available_assets.append({
+                    "device_type": device_type,
+                    "required_quantity": quantity,
+                    "available_quantity": available_count,
+                    "priority": priority,
+                    "sufficient": available_count >= quantity,
+                    "assets": assets_result["assets"]
+                })
+            
+            return {
+                "success": True,
+                "employee_id": emp_id,
+                "employee_name": employee_name,
+                "department": employee_dept,
+                "role": employee_role,
+                "total_needed": total_needed,
+                "total_available": total_available,
+                "can_fully_equip": total_available >= total_needed,
+                "requirements": assets_needed,
+                "available_assets": available_assets
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"Error retrieving available assets: {str(e)}"
+            }
+    
+    @staticmethod
     def get_resignation_assets_info(employee_id: int, db: Session) -> Dict[str, Any]:
         """
         Get information about assets that must be returned if employee resigns
@@ -312,8 +445,50 @@ class UnifiedChatbotTools:
             )
         }
     
+    @staticmethod
+    def extract_role_and_department(question: str) -> Dict[str, Optional[str]]:
+        """
+        Extract role and department from question text
+        
+        Args:
+            question: User's question
+            
+        Returns:
+            Dictionary with role and department (None if not found)
+        """
+        import re
+        
+        question_lower = question.lower()
+        
+        # Extract department
+        department = None
+        if any(word in question_lower for word in ["it department", "in it", "it team", "it employee"]):
+            department = "it"
+        elif any(word in question_lower for word in ["marketing department", "in marketing", "marketing team", "marketing employee"]):
+            department = "marketing"
+        
+        # Extract role
+        role = None
+        if any(word in question_lower for word in ["manager", "team lead", "head of"]):
+            role = "manager"
+        elif any(word in question_lower for word in ["developer", "engineer", "programmer", "software engineer"]):
+            role = "developer"
+        elif any(word in question_lower for word in ["specialist", "analyst", "coordinator", "staff"]):
+            role = "specialist"
+        
+        return {
+            "role": role,
+            "department": department
+        }
+    
     @classmethod
-    def classify_question_type(cls, question: str, use_ml: bool = True, ml_threshold: float = 0.4) -> str:
+    def classify_question_type(
+        cls, 
+        question: str, 
+        use_ml: bool = True, 
+        ml_threshold: float = 0.4,
+        previous_question_type: Optional[str] = None
+    ) -> str:
         """
         Classify the type of question being asked using ML or keyword fallback
         
@@ -321,12 +496,59 @@ class UnifiedChatbotTools:
             question: User's question
             use_ml: Whether to use ML-based classification (default True)
             ml_threshold: Minimum confidence threshold for ML classification (default 0.4)
+            previous_question_type: The question type from previous conversation turn (for context)
             
         Returns:
             Question type: 'asset_count', 'resignation_assets', 'churn_prediction', 
                           'churn_list', 'churn_department', 'asset_health', 
-                          'procurement_forecast', 'send_recovery_email', or 'general'
+                          'procurement_forecast', 'send_recovery_email', 'assign_asset', or 'general'
         """
+        # Debug logging
+        print(f"[Classification] Question: '{question}'")
+        print(f"[Classification] Previous question type: {previous_question_type}")
+        
+        # Check if this is a follow-up providing missing information
+        # If previous question was assign_asset and current question provides role/dept info,
+        # and doesn't clearly indicate a different topic, maintain assign_asset context
+        if previous_question_type == 'assign_asset':
+            question_lower = question.lower()
+            
+            # Check if this looks like a response providing role/department info
+            # Check for explicit role/dept statements
+            has_explicit_info = any(phrase in question_lower for phrase in [
+                'role is', 'department is', 'position is', 'job is',
+                'he is a', 'she is a', 'he is an', 'she is an',
+                'they are a', 'they are an'
+            ])
+            
+            # Check for department indicators
+            has_department = any(dept in question_lower for dept in [
+                'in it', 'in marketing', 'it department', 'marketing department',
+                'it team', 'marketing team', 'from it', 'from marketing'
+            ])
+            
+            # Check for role indicators
+            has_role = any(role in question_lower for role in [
+                'developer', 'manager', 'specialist', 'engineer', 'staff',
+                'analyst', 'coordinator', 'programmer', 'team lead',
+                'head of', 'software engineer'
+            ])
+            
+            # Check if it's clearly NOT about a different topic
+            is_clearly_different_topic = any(keyword in question_lower for keyword in [
+                'churn', 'resign', 'quit', 'leave', 'turnover', 'attrition',
+                'how many asset', 'asset count', 'procurement', 'buy',
+                'asset health', 'send email', 'recovery', 'return',
+                'what assets does', 'list assets', 'show assets'
+            ])
+            
+            # If providing role/dept info and not clearly a different topic, stay with assign_asset
+            has_role_dept_info = has_explicit_info or (has_department and has_role) or (has_department or has_role)
+            
+            if has_role_dept_info and not is_clearly_different_topic:
+                print(f"[Context-Aware Classification] Maintaining assign_asset context from previous turn")
+                print(f"[Context-Aware Classification] Detected - Explicit: {has_explicit_info}, Dept: {has_department}, Role: {has_role}")
+                return 'assign_asset'
         # Try ML-based classification first
         if use_ml:
             try:
@@ -375,6 +597,15 @@ class UnifiedChatbotTools:
             "what assets does", "list assets", "assets held by"
         ]):
             return "asset_count"
+        
+        # Asset assignment for new employees
+        if any(keyword in question_lower for keyword in [
+            "assign asset", "available asset", "can be assigned", "what can i assign",
+            "which assets available", "assets for new employee", "onboard", "new hire",
+            "available for employee", "can assign to", "what equipment available",
+            "available equipment"
+        ]):
+            return "assign_asset"
         
         # Resignation/return questions
         if any(keyword in question_lower for keyword in [

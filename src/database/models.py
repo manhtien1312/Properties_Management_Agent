@@ -1,7 +1,7 @@
-from sqlalchemy import Column, Integer, String, Date, Boolean, Numeric, ForeignKey, CheckConstraint, Text
+from sqlalchemy import Column, Integer, String, Date, Boolean, Numeric, ForeignKey, CheckConstraint, Text, DateTime
 from sqlalchemy.orm import relationship
 from src.database.database import Base
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
 
@@ -78,3 +78,36 @@ class HRAnalytic(Base):
 
     # Relationships
     employee = relationship("Employee", back_populates="hr_analytics")
+
+
+class ConversationThread(Base):
+    __tablename__ = "ConversationThread"
+
+    thread_id = Column(String, primary_key=True, index=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    last_updated = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    message_count = Column(Integer, nullable=False, default=0)
+    
+    # Relationships
+    messages = relationship("ConversationMessage", back_populates="thread", cascade="all, delete-orphan", order_by="ConversationMessage.timestamp")
+
+
+class ConversationMessage(Base):
+    __tablename__ = "ConversationMessage"
+
+    message_id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    thread_id = Column(String, ForeignKey("ConversationThread.thread_id"), nullable=False, index=True)
+    role = Column(String, nullable=False)  # 'user' or 'assistant'
+    content = Column(Text, nullable=False)
+    timestamp = Column(DateTime, nullable=False, default=datetime.utcnow)
+    
+    # Metadata
+    employee_id = Column(Integer, nullable=True)
+    question_type = Column(String, nullable=True)
+    has_context_data = Column(Boolean, nullable=True)
+    
+    # Store the full context data as JSON text
+    context_data = Column(Text, nullable=True)  # Serialized JSON of context
+    
+    # Relationships
+    thread = relationship("ConversationThread", back_populates="messages")

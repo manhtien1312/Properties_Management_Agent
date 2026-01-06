@@ -5,19 +5,238 @@ Provides employee churn risk assessment and predictions
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from pydantic import BaseModel
 from src.database.database import get_db
 from src.agent.asset_assignment_agent import get_employee_lifecycle_agent
 from src.agent.tool.churn_prediction_tools import ChurnPredictionTools
+from src.database.models import ConversationThread, ConversationMessage
+import uuid
+import json
+from datetime import datetime
 
 router = APIRouter(prefix="/api/churn", tags=["churn-prediction"])
+
+
+class ConversationMemory:
+    """Database-backed conversation storage for chatbot threads"""
+    
+    def create_thread(self, db: Session) -> str:
+        """Create a new conversation thread in database"""
+        thread_id = str(uuid.uuid4())
+        
+        thread = ConversationThread(
+            thread_id=thread_id,
+            created_at=datetime.utcnow(),
+            last_updated=datetime.utcnow(),
+            message_count=0
+        )
+        
+        db.add(thread)
+        db.commit()
+        db.refresh(thread)
+        
+        return thread_id
+    
+    def add_message(
+        self, 
+        thread_id: str, 
+        role: str, 
+        content: str, 
+        db: Session,
+        employee_id: Optional[int] = None,
+        question_type: Optional[str] = None,
+        has_context_data: Optional[bool] = None,
+        context_data: Optional[Dict[str, Any]] = None
+    ):
+        """Add a message to the conversation thread in database"""
+        
+        # Get or create thread
+        thread = db.query(ConversationThread).filter(ConversationThread.thread_id == thread_id).first()
+        
+        if not thread:
+            thread = ConversationThread(
+                thread_id=thread_id,
+                created_at=datetime.utcnow(),
+                last_updated=datetime.utcnow(),
+                message_count=0
+            )
+            db.add(thread)
+        
+        # Serialize context_data to JSON if provided
+        context_data_json = None
+        if context_data is not None:
+            try:
+                context_data_json = json.dumps(context_data)
+            except (TypeError, ValueError):
+                # If serialization fails, store as string representation
+                context_data_json = str(context_data)
+        
+        # Create message
+        message = ConversationMessage(
+            thread_id=thread_id,
+            role=role,
+            content=content,
+            timestamp=datetime.utcnow(),
+            employee_id=employee_id,
+            question_type=question_type,
+            has_context_data=has_context_data,
+            context_data=context_data_json
+        )
+        
+        db.add(message)
+        
+        # Update thread metadata
+        thread.last_updated = datetime.utcnow()
+        thread.message_count = db.query(ConversationMessage).filter(
+            ConversationMessage.thread_id == thread_id
+        ).count() + 1
+        
+        db.commit()
+    
+    def get_conversation(self, thread_id: str, db: Session) -> List[Dict[str, Any]]:
+        """Get all messages in a conversation thread from database"""
+        messages = db.query(ConversationMessage).filter(
+            ConversationMessage.thread_id == thread_id
+        ).order_by(ConversationMessage.timestamp).all()
+        
+        result = []
+        for msg in messages:
+            # Deserialize context_data if present
+            context_data = None
+            if msg.context_data:
+                try:
+                    context_data = json.loads(msg.context_data)
+                except (json.JSONDecodeError, ValueError):
+                    context_data = None
+            
+            result.append({
+                "role": msg.role,
+                "content": msg.content,
+                "timestamp": msg.timestamp.isoformat(),
+                "metadata": {
+                    "employee_id": msg.employee_id,
+                    "question_type": msg.question_type,
+                    "has_context_data": msg.has_context_data
+                },
+                "context_data": context_data
+            })
+        
+        return result
+    
+    def get_context_summary(self, thread_id: str, db: Session, max_messages: int = 10) -> str:
+        """Get a formatted summary of recent conversation with full context data for LLM"""
+        messages = db.query(ConversationMessage).filter(
+            ConversationMessage.thread_id == thread_id
+        ).order_by(ConversationMessage.timestamp.desc()).limit(max_messages).all()
+        
+        if not messages:
+            return ""
+        
+        # Reverse to get chronological order
+        messages = list(reversed(messages))
+        
+        context_lines = ["=== PREVIOUS CONVERSATION HISTORY WITH DATA ==="]
+        
+        for msg in messages:
+            role = msg.role.upper()
+            content = msg.content
+            
+            context_lines.append(f"\n{role}: {content}")
+            
+            # Include the actual context data if available
+            if msg.context_data and msg.role == "assistant":
+                try:
+                    context_data = json.loads(msg.context_data)
+                    
+                    # Add relevant data summary
+                    if context_data and isinstance(context_data, dict):
+                        context_lines.append(f"[DATA FROM THIS RESPONSE]:")
+                        
+                        # Include employee_id if present
+                        if context_data.get('employee_id'):
+                            context_lines.append(f"  - Employee ID: {context_data['employee_id']}")
+                        
+                        if context_data.get('employee_name'):
+                            context_lines.append(f"  - Employee Name: {context_data['employee_name']}")
+                        
+                        # Include asset information if present
+                        if context_data.get('total_assets') is not None:
+                            context_lines.append(f"  - Total Assets: {context_data['total_assets']}")
+                        
+                        if context_data.get('assets_by_type'):
+                            context_lines.append(f"  - Assets By Type: {context_data['assets_by_type']}")
+                        
+                        if context_data.get('count_by_type'):
+                            context_lines.append(f"  - Count By Type: {context_data['count_by_type']}")
+                        
+                        # Include asset details if available
+                        if context_data.get('assets'):
+                            assets = context_data['assets']
+                            if isinstance(assets, list) and len(assets) > 0:
+                                context_lines.append(f"  - Asset Details Available: {len(assets)} asset(s)")
+                                context_lines.append(f"  - Full Asset List: {json.dumps(assets, indent=4)}")
+                        
+                        # Include churn prediction data
+                        if context_data.get('probability') is not None:
+                            context_lines.append(f"  - Churn Probability: {context_data['probability']}")
+                            context_lines.append(f"  - Risk Category: {context_data.get('risk_category')}")
+                        
+                        # Include high-risk employees if present
+                        if context_data.get('high_risk_employees'):
+                            context_lines.append(f"  - High Risk Employees: {len(context_data['high_risk_employees'])} employees")
+                        
+                        # Include available assets for assignment
+                        if context_data.get('available_assets'):
+                            context_lines.append(f"  - Total Assets Needed: {context_data.get('total_needed')}")
+                            context_lines.append(f"  - Total Assets Available: {context_data.get('total_available')}")
+                            context_lines.append(f"  - Can Fully Equip: {context_data.get('can_fully_equip')}")
+                            context_lines.append(f"  - Available Assets Details: {json.dumps(context_data['available_assets'], indent=4)}")
+                        
+                except (json.JSONDecodeError, ValueError):
+                    pass
+        
+        context_lines.append("\n=== END OF CONVERSATION HISTORY ===\n")
+        context_lines.append("IMPORTANT: Use the data from previous responses to answer follow-up questions.")
+        context_lines.append("If the user asks 'list them', 'show details', 'what are they' - refer to the data above.\n")
+        
+        return "\n".join(context_lines)
+    
+    def clear_thread(self, thread_id: str, db: Session):
+        """Clear a conversation thread from database"""
+        thread = db.query(ConversationThread).filter(
+            ConversationThread.thread_id == thread_id
+        ).first()
+        
+        if thread:
+            db.delete(thread)  # Cascade will delete messages
+            db.commit()
+    
+    def get_metadata(self, thread_id: str, db: Session) -> Dict[str, Any]:
+        """Get metadata for a conversation thread"""
+        thread = db.query(ConversationThread).filter(
+            ConversationThread.thread_id == thread_id
+        ).first()
+        
+        if not thread:
+            return {}
+        
+        return {
+            "created_at": thread.created_at.isoformat(),
+            "last_updated": thread.last_updated.isoformat(),
+            "message_count": thread.message_count
+        }
+
+
+# Global conversation memory instance
+conversation_memory = ConversationMemory()
 
 
 class ChatbotRequest(BaseModel):
     """Request model for chatbot endpoint"""
     question: str
     employee_id: Optional[int] = None
+    thread_id: Optional[str] = None  # For maintaining conversation context
 
 
 @router.get("/predict/{employee_id}", response_model=dict)
@@ -172,6 +391,12 @@ def churn_chatbot(
         # Extract from request body
         question = request.question
         employee_id = request.employee_id
+        thread_id = request.thread_id
+        
+        # Create new thread if not provided
+        if not thread_id:
+            thread_id = conversation_memory.create_thread(db)
+        
         from langchain_google_genai import ChatGoogleGenerativeAI
         from src.config import settings
         from src.agent.tool.chatbot_tools import UnifiedChatbotTools
@@ -179,8 +404,26 @@ def churn_chatbot(
         from src.agent.tool.procurement_forecasting_tools import ProcurementForecastingTools
         from src.agent.asset_recovery_agent import get_asset_recovery_agent
         
-        # Classify question type
-        question_type = UnifiedChatbotTools.classify_question_type(question)
+        # Get previous conversation context to help with classification
+        previous_question_type = None
+        if thread_id:
+            recent_messages = conversation_memory.get_conversation(thread_id, db)
+            print(f"[Debug] Retrieved {len(recent_messages) if recent_messages else 0} messages from thread {thread_id}")
+            if recent_messages:
+                # Get the last assistant message to see what topic we were discussing
+                for msg in reversed(recent_messages):
+                    if msg['role'] == 'assistant' and msg['metadata'].get('question_type'):
+                        previous_question_type = msg['metadata']['question_type']
+                        print(f"[Debug] Found previous question_type: {previous_question_type}")
+                        break
+        
+        print(f"[Debug] Classifying with previous_question_type: {previous_question_type}")
+        
+        # Classify question type with conversation context
+        question_type = UnifiedChatbotTools.classify_question_type(
+            question, 
+            previous_question_type=previous_question_type
+        )
         
         # Extract employee_id from question if not provided
         if not employee_id:
@@ -433,6 +676,21 @@ def churn_chatbot(
                     'success': False,
                     'error': 'Department not specified. Please mention IT or Marketing department.'
                 }
+        # For assign_asset, extract role and department from question
+        role = None
+        department = None
+        if question_type == "assign_asset":
+            role_dept = UnifiedChatbotTools.extract_role_and_department(question)
+            role = role_dept.get("role")
+            department = role_dept.get("department")
+            
+            # Get available assets (works with or without employee_id)
+            context_data = UnifiedChatbotTools.get_available_assets_for_new_employee(
+                employee_id=employee_id,
+                db=db,
+                role=role,
+                department=department
+            )
         elif employee_id:
             if question_type == "asset_count":
                 context_data = UnifiedChatbotTools.get_employee_asset_count(employee_id, db)
@@ -472,6 +730,9 @@ def churn_chatbot(
             temperature=0.7
         )
         
+        # Get conversation history for context
+        conversation_context = conversation_memory.get_context_summary(thread_id, db)
+        
         # Build prompt based on question type
         system_prompt = """You are an HR Analytics and Asset Management AI Assistant with DIRECT ACCESS to the company's employee and asset management database.
 
@@ -482,16 +743,23 @@ IMPORTANT INSTRUCTIONS:
 - PROVIDE SPECIFIC, CONCRETE ANSWERS using the data given
 - Answer questions directly and factually based on the retrieved data
 - If no data is provided, only then say the employee was not found
+- REMEMBER the conversation history - use it to understand context and follow-up questions
+- When user asks "list them", "show details", "what about them" - refer to previous conversation
 
 You can help with:
 1. Employee Asset Management - Track assets assigned to employees
-2. Asset Health & Refresh - Determine if returned assets need replacement (>3 years old)
-3. Churn Prediction - Predict employee turnover risk using ML
-4. Asset Health Reports - Overview of all assets age, condition, and refresh needs
-5. Procurement Forecasting - Predict asset purchase needs based on aging and churn
-6. Asset Recovery - Send email notifications for asset returns when employees resign
+2. Asset Assignment - Show available assets that can be assigned to new employees based on their role
+3. Asset Health & Refresh - Determine if returned assets need replacement (>3 years old)
+4. Churn Prediction - Predict employee turnover risk using ML
+5. Asset Health Reports - Overview of all assets age, condition, and refresh needs
+6. Procurement Forecasting - Predict asset purchase needs based on aging and churn
+7. Asset Recovery - Send email notifications for asset returns when employees resign
 
 """
+        
+        # Add conversation history if it exists
+        if conversation_context:
+            system_prompt += f"\n{conversation_context}\n"
         
         if question_type == "send_recovery_email":
             if context_data and context_data.get('success'):
@@ -710,6 +978,79 @@ DETAILED ASSET LIST:
             else:
                 system_prompt += f"\nERROR: {context_data.get('error')}\n"
         
+        elif question_type == "assign_asset" and context_data:
+            if context_data.get('needs_info'):
+                # Missing role or department information
+                missing = []
+                if context_data.get('missing_fields', {}).get('role'):
+                    missing.append('role (e.g., developer, manager, specialist)')
+                if context_data.get('missing_fields', {}).get('department'):
+                    missing.append('department (IT or Marketing)')
+                
+                system_prompt += f"""
+=== MISSING INFORMATION ===
+
+To determine which assets can be assigned, I need the following information:
+- {' and '.join(missing)}
+
+Please ask the user to provide: {', '.join(missing)}
+
+Examples:
+- "What assets for a new IT developer?"
+- "Assign assets for marketing manager"
+- "New employee in IT department, manager role"
+
+IMPORTANT: Politely ask for the missing information. Do not make assumptions.
+"""
+            elif context_data.get('success'):
+                system_prompt += f"""
+=== DATABASE QUERY RESULTS (ALREADY RETRIEVED) ===
+
+New Employee Information:
+- Name: {context_data.get('employee_name')}
+- ID: {context_data.get('employee_id') if context_data.get('employee_id') else 'Not yet assigned'}
+- Department: {context_data.get('department')}
+- Role: {context_data.get('role')}
+
+ASSET REQUIREMENTS & AVAILABILITY:
+- Total Assets Needed: {context_data.get('total_needed')}
+- Total Assets Available: {context_data.get('total_available')}
+- Can Fully Equip: {'✅ YES' if context_data.get('can_fully_equip') else '❌ NO - Insufficient inventory'}
+
+DETAILED REQUIREMENTS:
+"""
+                for req in context_data.get('requirements', []):
+                    system_prompt += f"\n{req['quantity']}x {req['type'].upper()} (Priority {req['priority']})"
+                
+                system_prompt += "\n\nAVAILABLE ASSETS BY TYPE:\n"
+                for asset_group in context_data.get('available_assets', []):
+                    device_type = asset_group['device_type']
+                    required = asset_group['required_quantity']
+                    available = asset_group['available_quantity']
+                    sufficient = asset_group['sufficient']
+                    
+                    status = "✅ Sufficient" if sufficient else "⚠️ Insufficient"
+                    system_prompt += f"\n{device_type.upper()}: {available}/{required} available - {status}\n"
+                    
+                    if asset_group.get('assets'):
+                        for asset in asset_group['assets']:
+                            system_prompt += f"  - Asset Tag: {asset['asset_tag']}\n"
+                            system_prompt += f"    Model: {asset['brand']} {asset['model']}\n"
+                            system_prompt += f"    Condition: {asset['condition']}\n"
+                            system_prompt += f"    Serial: {asset['serial_number']}\n"
+                    else:
+                        system_prompt += "  ⚠️ No assets available for this type\n"
+                
+                system_prompt += f"""
+
+RECOMMENDATIONS:
+- Assets are prioritized by condition (excellent > good > fair)
+- If inventory is insufficient, procurement is needed
+- All listed assets are currently unassigned and ready for assignment
+"""
+            else:
+                system_prompt += f"\nERROR: {context_data.get('error')}\n"
+        
         elif question_type == "resignation_assets" and context_data:
             if context_data.get('success'):
                 system_prompt += f"""
@@ -918,11 +1259,33 @@ Your answer:"""
         response = llm.invoke(user_message)
         answer = response.content if hasattr(response, 'content') else str(response)
         
+        # Store the conversation in database
+        conversation_memory.add_message(
+            thread_id, 
+            "user", 
+            question,
+            db,
+            employee_id=employee_id,
+            question_type=question_type,
+            context_data=None  # User messages don't have context data
+        )
+        conversation_memory.add_message(
+            thread_id,
+            "assistant",
+            answer,
+            db,
+            employee_id=employee_id,  # Also save employee_id for assistant
+            question_type=question_type,  # IMPORTANT: Save question_type for context-aware classification
+            has_context_data=(context_data is not None),
+            context_data=context_data  # Save the full context data
+        )
+        
         result = {
             "success": True,
             "question": question,
             "question_type": question_type,
             "answer": answer,
+            "thread_id": thread_id,  # Return thread_id for follow-up questions
             "context": {
                 "employee_id": employee_id,
                 "has_context_data": context_data is not None,
